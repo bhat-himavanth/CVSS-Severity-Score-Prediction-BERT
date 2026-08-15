@@ -1,0 +1,93 @@
+
+#  CVSS Severity Classification Model Training (Transformers v5+ Compatible)
+
+
+# Imports
+from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding
+from sklearn.metrics import accuracy_score, f1_score
+import numpy as np
+import os
+import torch
+
+
+# Config
+
+MODEL_NAME = "bert-base-uncased"
+OUTPUT_DIR = "/kaggle/working"   # or "./" if local
+EPOCHS = 3
+BATCH_SIZE = 8
+LR = 2e-5
+
+
+# Model Setup
+
+num_labels = len(le.classes_)  # 'le' from LabelEncoder
+cls_model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=num_labels)
+
+
+# Metrics
+
+def compute_metrics_cls(eval_pred):
+    logits, labels = eval_pred
+    preds = np.argmax(logits, axis=1)
+    acc = accuracy_score(labels, preds)
+    f1 = f1_score(labels, preds, average="weighted", zero_division=0)
+    return {"accuracy": acc, "f1": f1}
+
+
+# Training Arguments (v5 compatible)
+
+training_args_cls = TrainingArguments(
+    output_dir=os.path.join(OUTPUT_DIR, "cls_results"),
+    eval_strategy="epoch",               #  changed from evaluation_strategy
+    save_strategy="epoch",
+    learning_rate=LR,
+    per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
+    num_train_epochs=EPOCHS,
+    weight_decay=0.01,
+    load_best_model_at_end=True,
+    metric_for_best_model="f1",
+    fp16=torch.cuda.is_available(),
+    report_to="none",                   # disable W&B, etc.
+    remove_unused_columns=False,
+    logging_dir=os.path.join(OUTPUT_DIR, "logs"),
+    logging_strategy="steps",
+    logging_steps=100,
+)
+
+
+# Trainer
+
+trainer_cls = Trainer(
+    model=cls_model,
+    args=training_args_cls,
+    train_dataset=hf_train_cls,   #  classification dataset
+    eval_dataset=hf_val_cls,
+    tokenizer=tokenizer,
+    data_collator=DataCollatorWithPadding(tokenizer),
+    compute_metrics=compute_metrics_cls,
+)
+
+
+# Train Model
+
+print("==  TRAINING CLASSIFICATION MODEL ==")
+trainer_cls.train()
+
+
+# Save Model & Tokenizer
+
+save_path = os.path.join(OUTPUT_DIR, "cvss_classification_model")
+trainer_cls.save_model(save_path)
+tokenizer.save_pretrained(save_path)
+print(f" Model saved to: {save_path}")
+
+
+# Evaluate Model
+
+eval_results = trainer_cls.evaluate()
+print("\n==  Validation Results ==")
+for k, v in eval_results.items():
+    print(f"{k}: {v:.4f}")
+

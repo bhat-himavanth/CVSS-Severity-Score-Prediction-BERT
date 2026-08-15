@@ -1,0 +1,143 @@
+import pandas as pd
+import re, html
+from datasets import Dataset
+from sklearn.preprocessing import LabelEncoder
+from transformers import AutoTokenizer
+
+
+# Load dataset
+
+DATA_PATH = "/kaggle/input/csv-ds/cve.csv"   
+df = pd.read_csv(DATA_PATH)
+
+print(" Loaded data shape:", df.shape)
+print("Columns:", df.columns.tolist())
+
+# Ensure required columns exist
+if "summary" not in df.columns or "cvss" not in df.columns:
+    raise ValueError("Expected columns: ['summary', 'cvss', 'pub_date']")
+
+
+# Clean data
+
+def score_to_severity(score):
+    if score == 0.0:
+        return "None"
+    elif score <= 3.9:
+        return "Low"
+    elif score <= 6.9:
+        return "Medium"
+    elif score <= 8.9:
+        return "High"
+    else:
+        return "Critical"
+
+df["severity"] = df["cvss"].apply(score_to_severity)
+df = df.dropna(subset=["summary", "cvss"]).drop_duplicates(subset=["summary"])
+
+# Encode severity labels
+le = LabelEncoder()
+df["severity_label"] = le.fit_transform(df["severity"])
+
+
+# Safe sort (no errors param)
+
+if "pub_date" in df.columns:
+    try:
+        df["pub_date"] = pd.to_datetime(df["pub_date"], errors="coerce")
+        df = df.sort_values("pub_date").reset_index(drop=True)
+    except Exception as e:
+        print(" Could not sort by pub_date:", e)
+        df = df.reset_index(drop=True)
+else:
+    print(" 'pub_date' column not found, skipping time-based sort.")
+    df = df.reset_index(drop=True)
+
+
+# Train / Validation / Test Split
+
+n = len(df)
+train_end = int(n * 0.8)
+val_end = int(n * 0.9)
+train_df = df.iloc[:train_end]
+val_df = df.iloc[train_end:val_end]
+test_df = df.iloc[val_end:]
+
+print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+
+
+# Tokenization setup
+
+MODEL_NAME = "bert-base-uncased"
+MAX_LEN = 256
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+def clean_text(text):
+    if not isinstance(text, str):
+        return ""
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text.strip())
+    return text
+
+def preprocess_function(batch):
+    texts = [clean_text(x) for x in batch["summary"]]
+    return tokenizer(texts, truncation=True, padding="max_length", max_length=MAX_LEN)
+
+def safe_map(dataset):
+    remove_cols = [c for c in dataset.column_names if c in ["summary", "pub_date"]]
+    return dataset.map(preprocess_function, batched=True, remove_columns=remove_cols)
+
+
+# Convert pandas → Hugging Face datasets
+
+hf_train = Dataset.from_pandas(train_df)
+hf_val = Dataset.from_pandas(val_df)
+hf_test = Dataset.from_pandas(test_df)
+
+# Apply preprocessing safely
+hf_train = safe_map(hf_train)
+hf_val = safe_map(hf_val)
+hf_test = safe_map(hf_test)
+
+
+# Add numeric + label columns
+
+for ds_name, ds, df_part in zip(["train", "val", "test"], [hf_train, hf_val, hf_test], [train_df, val_df, test_df]):
+    new_cols = {
+        "base_score": df_part["cvss"].astype(float).tolist(),
+        "severity_label": df_part["severity_label"].astype(int).tolist()
+    }
+    for col in ["base_score", "severity_label"]:
+        if col in ds.column_names:
+            ds = ds.remove_columns([col])
+    ds = ds.add_column("base_score", new_cols["base_score"])
+    ds = ds.add_column("severity_label", new_cols["severity_label"])
+
+    if ds_name == "train":
+        hf_train = ds
+    elif ds_name == "val":
+        hf_val = ds
+    else:
+        hf_test = ds
+
+
+# Create classification and regression variants
+
+hf_train_cls = hf_train.rename_column("severity_label", "labels")
+hf_val_cls = hf_val.rename_column("severity_label", "labels")
+hf_test_cls = hf_test.rename_column("severity_label", "labels")
+
+hf_train_reg = hf_train.rename_column("base_score", "labels")
+hf_val_reg = hf_val.rename_column("base_score", "labels")
+hf_test_reg = hf_test.rename_column("base_score", "labels")
+
+
+# Set torch format
+
+hf_train_cls.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+hf_val_cls.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+hf_train_reg.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+hf_val_reg.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+
+print(" Tokenization complete! Ready for training.")

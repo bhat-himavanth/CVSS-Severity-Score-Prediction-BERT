@@ -1,0 +1,69 @@
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import numpy as np
+
+
+# Paths (update if needed)
+
+CLASS_MODEL_PATH = "/kaggle/input/classification-trained-model/pytorch/default/1"
+REG_MODEL_PATH   = "/kaggle/input/regression-trained-model/pytorch/default/1"
+
+# Load both models
+print(" Loading models...")
+tokenizer_cls = AutoTokenizer.from_pretrained(CLASS_MODEL_PATH)
+model_cls = AutoModelForSequenceClassification.from_pretrained(CLASS_MODEL_PATH)
+
+tokenizer_reg = AutoTokenizer.from_pretrained(REG_MODEL_PATH)
+model_reg = AutoModelForSequenceClassification.from_pretrained(REG_MODEL_PATH)
+
+model_cls.eval()
+model_reg.eval()
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_cls.to(device)
+model_reg.to(device)
+print(f" Models loaded on {device.upper()}")
+
+
+# Label mapping (must match training)
+
+label_names = ["None", "Low", "Medium", "High", "Critical"]  # adjust if needed
+
+
+# Preprocessing function
+
+def preprocess(text, tokenizer, max_len=256):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding="max_length", max_length=max_len)
+    return {k: v.to(device) for k, v in inputs.items()}
+
+
+# Prediction function
+
+def predict_cve(text):
+    # ---- Classification ----
+    inputs_cls = preprocess(text, tokenizer_cls)
+    with torch.no_grad():
+        outputs_cls = model_cls(**inputs_cls)
+        preds_cls = torch.argmax(outputs_cls.logits, dim=1).cpu().item()
+        severity = label_names[preds_cls]
+
+    # ---- Regression ----
+    inputs_reg = preprocess(text, tokenizer_reg)
+    with torch.no_grad():
+        outputs_reg = model_reg(**inputs_reg)
+        score = outputs_reg.logits.squeeze().cpu().item()
+        score = float(np.clip(score, 0.0, 10.0))  # ensure 0–10 range
+
+    return severity, score
+
+
+# Interactive Input
+
+while True:
+    user_input = input("\nEnter vulnerability description (or 'exit' to quit):\n> ")
+    if user_input.lower() in ["exit", "quit"]:
+        break
+
+    severity, score = predict_cve(user_input)
+    print("\n Prediction Results:")
+    print(f"  Severity Level: {severity}")
+    print(f"  CVSS Base Score: {score:.2f}")

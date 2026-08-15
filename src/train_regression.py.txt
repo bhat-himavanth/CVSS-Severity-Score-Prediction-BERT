@@ -1,0 +1,93 @@
+# CVSS Base Score Regression Model Training (Transformers v5+ Compatible)
+
+
+from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import numpy as np
+import os
+import torch
+
+
+# Config
+
+MODEL_NAME = "bert-base-uncased"
+OUTPUT_DIR = "/kaggle/working"   # or "./" if local
+EPOCHS = 3
+BATCH_SIZE = 8
+LR = 2e-5
+
+
+# Model Setup
+
+reg_model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=1)
+reg_model.config.problem_type = "regression"
+
+
+# Metrics
+
+def compute_metrics_reg(eval_pred):
+    preds, labels = eval_pred
+    if isinstance(preds, tuple):
+        preds = preds[0]
+    preds = preds.squeeze()
+    preds = np.clip(preds, 0.0, 10.0)  # CVSS scores are between 0–10
+    mae = mean_absolute_error(labels, preds)
+    rmse = mean_squared_error(labels, preds, squared=False)
+    return {"mae": mae, "rmse": rmse}
+
+
+# Training Arguments (v5+ compatible)
+
+training_args_reg = TrainingArguments(
+    output_dir=os.path.join(OUTPUT_DIR, "reg_results"),
+    eval_strategy="epoch",           #  Transformers v5 syntax
+    save_strategy="epoch",
+    learning_rate=LR,
+    per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
+    num_train_epochs=EPOCHS,
+    weight_decay=0.01,
+    load_best_model_at_end=True,
+    metric_for_best_model="mae",
+    fp16=torch.cuda.is_available(),
+    remove_unused_columns=False,
+    report_to="none",
+    logging_dir=os.path.join(OUTPUT_DIR, "logs_reg"),
+    logging_strategy="steps",
+    logging_steps=100,
+)
+
+
+# Trainer Setup
+
+trainer_reg = Trainer(
+    model=reg_model,
+    args=training_args_reg,
+    train_dataset=hf_train_reg,    #  regression dataset (from your preprocessing)
+    eval_dataset=hf_val_reg,
+    tokenizer=tokenizer,
+    data_collator=DataCollatorWithPadding(tokenizer),
+    compute_metrics=compute_metrics_reg,
+)
+
+
+# Train Regression Model
+
+print("\n==  TRAINING REGRESSION MODEL ==")
+trainer_reg.train()
+
+
+# Save Regression Model & Tokenizer
+
+save_path_reg = os.path.join(OUTPUT_DIR, "cvss_regression_model")
+trainer_reg.save_model(save_path_reg)
+tokenizer.save_pretrained(save_path_reg)
+print(f" Regression model saved to: {save_path_reg}")
+
+
+# Evaluate Regression Model
+
+eval_results_reg = trainer_reg.evaluate()
+print("\n==  Regression Model Evaluation Results ==")
+for k, v in eval_results_reg.items():
+    print(f"{k}: {v:.4f}")
